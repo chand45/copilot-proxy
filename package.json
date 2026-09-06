@@ -1,0 +1,33 @@
+{
+  "name": "copilot-proxy",
+  "version": "0.1.0",
+  "description": "Local OpenAI-compatible Chat Completions and Responses proxy for GitHub Copilot.",
+  "keywords": [
+    "copilot",
+    "github-copilot",
+    "openai",
+    "proxy",
+    "cli"
+  ],
+  "type": "module",
+  "files": [
+    "src/*.js"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "copilot-proxy": "src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/cli.js start",
+    "login": "node src/cli.js login",
+    "test": "node --test",
+    "test:package": "node scripts/verify-package.js",
+    "prepublishOnly": "npm run check && npm test && npm run test:package",
+    "check": "node --check src/cli.js && node --check src/config.js && node --check src/server.js && node --check src/auth.js && node --check src/upstream.js && node --check src/pi.js && node --check src/credentials.js && node --check src/errors.js && node --check scripts/verify-package.js"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.84.4"
+  }
+}

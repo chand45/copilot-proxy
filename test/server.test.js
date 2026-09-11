@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { request } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
+import { parseArgs } from '../src/config.js';
 import { ProxyError } from '../src/errors.js';
 import { createProxyServer, listen } from '../src/server.js';
 
@@ -282,6 +283,112 @@ test('Responses HTTP requests and event streams pass through unchanged', async t
   assert.equal(response.status, 200);
   assert.deepEqual(forwarded, body);
   assert.equal(await response.text(), events);
+});
+
+function postResponses(url, encoded, chunked = false) {
+  return fetch(`${url}/v1/responses`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: chunked ? new ReadableStream({
+      start(controller) {
+        for (let offset = 0; offset < encoded.length; offset += 65536) {
+          controller.enqueue(encoded.subarray(offset, offset + 65536));
+        }
+        controller.close();
+      },
+    }) : encoded,
+    ...(chunked ? { duplex: 'half' } : {}),
+  });
+}
+
+test('default limit accepts large Codex Responses bodies with Content-Length or chunked uploads', async t => {
+  const body = {
+    model: 'responses-test-model', stream: true, store: false,
+    input: [
+      { role: 'user', content: 'Inspect this tool output.' },
+      { type: 'function_call', call_id: 'call_large', name: 'read_file', arguments: '{"path":"large.txt"}' },
+      { type: 'function_call_output', call_id: 'call_large', output: 'x'.repeat(3 * 1024 * 1024) },
+    ],
+  };
+  const encoded = Buffer.from(JSON.stringify(body));
+  const events = 'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n';
+  const calls = [];
+  const { url } = await fixture(t, {
+    responses: async value => {
+      calls.push(value);
+      return new Response(events, { headers: { 'content-type': 'text/event-stream' } });
+    },
+  }, { maxBodyBytes: parseArgs([], {}).maxBodyBytes });
+  for (const chunked of [false, true]) {
+    const response = await postResponses(url, encoded, chunked);
+    assert.equal(response.status, 200, `chunked=${chunked}`);
+    assert.equal(await response.text(), events);
+  }
+  assert.deepEqual(calls, [body, body]);
+});
+
+test('Responses limits count UTF-8 bytes and reject excess before calling upstream', async t => {
+  const encoded = Buffer.from(JSON.stringify({ model: 'test-model', input: '\u20ac'.repeat(30) }));
+  let calls = 0;
+  for (const chunked of [false, true]) {
+    for (const excess of [0, 1]) {
+      const limit = encoded.length - excess;
+      const { url } = await fixture(t, {
+        responses: async () => { calls++; return Response.json({ id: 'resp_test' }); },
+      }, { maxBodyBytes: limit });
+      const response = await postResponses(url, encoded, chunked);
+      assert.equal(response.status, excess ? 413 : 200, `chunked=${chunked}, excess=${excess}`);
+      const result = await response.json();
+      if (excess) {
+        assert.equal(result.error.code, 'body_too_large');
+        assert.ok(result.error.message.includes(`${limit} bytes`));
+        assert.match(result.error.message, /--max-body-bytes/);
+        assert.match(result.error.message, /COPILOT_PROXY_MAX_BODY_BYTES/);
+      }
+    }
+  }
+  assert.equal(calls, 2);
+});
+
+test('default Responses limit accepts a body larger than the former 64 MiB ceiling', async t => {
+  const inputLength = 65 * 1024 * 1024;
+  let forwardedLength;
+  const { url } = await fixture(t, {
+    responses: async body => {
+      forwardedLength = body.input.length;
+      return Response.json({ id: 'resp_large' });
+    },
+  }, { maxBodyBytes: parseArgs([], {}).maxBodyBytes, timeoutMs: 30000 });
+  const response = await postResponses(url, JSON.stringify({ model: 'test-model', input: 'x'.repeat(inputLength) }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { id: 'resp_large' });
+  assert.equal(forwardedLength, inputLength);
+});
+
+test('declared bodies above 512 MB fail locally with guidance to reduce the request', async t => {
+  let calls = 0;
+  const { port } = await fixture(t, {
+    responses: async () => { calls++; return Response.json({}); },
+  }, { maxBodyBytes: parseArgs([], {}).maxBodyBytes });
+  // Exercise the real maximum without allocating a half-gigabyte test body.
+  const result = await new Promise((resolve, reject) => {
+    const req = request({
+      hostname: '127.0.0.1', port, path: '/v1/responses', method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': '512000001' },
+    }, res => {
+      let text = '';
+      res.on('data', chunk => { text += chunk; });
+      res.on('error', reject);
+      res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(text) }));
+    });
+    req.on('error', reject);
+    req.end('{}');
+  });
+  assert.equal(result.status, 413);
+  assert.equal(result.body.error.code, 'body_too_large');
+  assert.match(result.body.error.message, /512000000 bytes/);
+  assert.match(result.body.error.message, /compact the conversation/);
+  assert.doesNotMatch(result.body.error.message, /larger --max-body-bytes/);
+  assert.equal(calls, 0);
 });
 
 test('mid-stream failure emits a structured error without pretending success', async t => {

@@ -19,6 +19,7 @@ test('CLI help/env work and login requires policy acknowledgment before loading 
   assert.match(help.stdout, /--accept-model-policy-changes/);
   assert.match(help.stdout, /copilot-proxy start/);
   assert.match(help.stdout, /copilot-proxy login/);
+  assert.match(help.stdout, /Default\/max: 512000000 \(512 MB\)/);
   const version = await execute(process.execPath, [cli, '--version'], { env });
   assert.equal(version.stdout.trim(), packageJson.version);
   const setup = await execute(process.execPath, [cli, 'env', '--port', '43210'], { env });
@@ -41,6 +42,7 @@ test('CLI starts a real local server without login and prints its actual ephemer
     env: {
       ...process.env, COPILOT_PROXY_HOST: '127.0.0.1', COPILOT_PROXY_API_KEY: '',
       COPILOT_PROXY_MODEL: '', COPILOT_PROXY_TIMEOUT_MS: '1000',
+      COPILOT_PROXY_MAX_BODY_BYTES: '512000000',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -69,5 +71,6 @@ test('CLI starts a real local server without login and prints its actual ephemer
   assert.equal(denied.status, 401);
   assert.equal((await denied.json()).error.code, 'login_required');
   assert.match(output, new RegExp(`${new URL(url).port}/v1`));
+  assert.match(output, /Request body limit: 512000000 bytes/);
   await assert.rejects(stat(authFile), { code: 'ENOENT' });
 });

@@ -1,6 +1,11 @@
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
+// OpenAI documents up to 512 MB total image payload per request. Decimal MB
+// also keeps ASCII JSON below Node's single-string ceiling (just under 512 MiB).
+export const MAX_BODY_BYTES = 512_000_000;
+export const DEFAULT_MAX_BODY_BYTES = MAX_BODY_BYTES;
+
 const options = new Map([
   ['host', 'COPILOT_PROXY_HOST'],
   ['port', 'COPILOT_PROXY_PORT'],
@@ -83,7 +88,7 @@ export function parseArgs(argv, env = process.env, cwd = process.cwd()) {
     model,
     apiKey,
     authFile,
-    maxBodyBytes: integer('Maximum body bytes', get('max-body-bytes', '2097152'), 1, 67108864),
+    maxBodyBytes: integer('Maximum body bytes', get('max-body-bytes', DEFAULT_MAX_BODY_BYTES), 1, MAX_BODY_BYTES),
     timeoutMs: integer('Request timeout', get('timeout-ms', '300000'), 1, 3600000),
     shell,
   };

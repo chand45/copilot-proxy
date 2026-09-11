@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import packageJson from '../package.json' with { type: 'json' };
-import { parseArgs, endpoint, environmentSetup } from './config.js';
+import { DEFAULT_MAX_BODY_BYTES, parseArgs, endpoint, environmentSetup } from './config.js';
 import { createProxyServer, listen } from './server.js';
 import { createAuthManager } from './auth.js';
 import { createCredentialStore } from './credentials.js';
@@ -27,7 +27,7 @@ Options:
   --model ID               Default model when a request omits model
   --api-key KEY            Optional local bearer key; prefer the environment
   --auth-file PATH         Private proxy credentials, outside this project
-  --max-body-bytes BYTES   Request body limit. Default: 2097152
+  --max-body-bytes BYTES   Request body limit. Default/max: ${DEFAULT_MAX_BODY_BYTES} (512 MB)
   --timeout-ms MS          Total request deadline. Default: 300000
   --shell SHELL            env/start output: powershell, bash, or both
   --accept-model-policy-changes
@@ -105,6 +105,7 @@ async function main() {
   const server = createProxyServer(config, { upstream });
   const port = await listen(server, config);
   console.log(`Copilot proxy listening at ${endpoint(config.host, port)}`);
+  console.log(`Request body limit: ${config.maxBodyBytes} bytes (override with --max-body-bytes).`);
   console.log('Login is checked on API requests. /health reports liveness only.');
   console.log(config.apiKey ? 'API routes require your local bearer key.' : 'No local bearer key configured. Only loopback clients can connect.');
   console.log(environmentSetup(config, port));

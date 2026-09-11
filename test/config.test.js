@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { constants as bufferConstants } from 'node:buffer';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import test from 'node:test';
@@ -14,6 +15,16 @@ test('defaults are loopback-only with no assumed model', () => {
   assert.equal(config.port, 4141);
   assert.equal(config.model, '');
   assert.equal(config.apiKey, '');
+  assert.equal(config.maxBodyBytes, 512_000_000);
+  assert.ok(config.maxBodyBytes < bufferConstants.MAX_STRING_LENGTH);
+});
+
+test('body limits honor environment and CLI overrides up to 512 MB', () => {
+  const bodyEnv = { ...env, COPILOT_PROXY_MAX_BODY_BYTES: '4194304' };
+  assert.equal(parseArgs([], bodyEnv, cwd).maxBodyBytes, 4194304);
+  assert.equal(parseArgs(['--max-body-bytes', '512000000'], bodyEnv, cwd).maxBodyBytes, 512000000);
+  assert.equal(parseArgs([], { ...env, COPILOT_PROXY_MAX_BODY_BYTES: '512000000' }, cwd).maxBodyBytes, 512000000);
+  assert.throws(() => parseArgs([], { ...env, COPILOT_PROXY_MAX_BODY_BYTES: '512000001' }, cwd));
 });
 
 test('installed commands can use the default credential store from the home directory', () => {
@@ -45,6 +56,7 @@ test('configuration rejects remote binds, invalid limits and project credentials
     ['--port', '-1'],
     ['--timeout-ms', 'NaN'],
     ['--max-body-bytes', '0'],
+    ['--max-body-bytes', '512000001'],
     ['--auth-file', 'auth.json'],
     ['--shell', 'fish'],
     ['--api-key', 'two words'],

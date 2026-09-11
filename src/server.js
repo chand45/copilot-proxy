@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
+import { MAX_BODY_BYTES } from './config.js';
 import { ProxyError, errorBody } from './errors.js';
 
 function sendJson(res, status, body, extraHeaders = {}) {
@@ -31,6 +32,13 @@ function authorize(req, apiKey) {
   }
 }
 
+function bodyTooLarge(limit) {
+  const guidance = limit < MAX_BODY_BYTES
+    ? `Restart copilot-proxy with a larger --max-body-bytes or COPILOT_PROXY_MAX_BODY_BYTES (maximum ${MAX_BODY_BYTES}), or reduce the request size.`
+    : 'Reduce large tool outputs or inline images, or compact the conversation before retrying.';
+  return new ProxyError(413, 'body_too_large', `Request body exceeds ${limit} bytes. ${guidance}`);
+}
+
 async function readJson(req, limit) {
   if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')) {
     throw new ProxyError(415, 'unsupported_media_type', 'Content-Type must be application/json.');
@@ -39,13 +47,13 @@ async function readJson(req, limit) {
     throw new ProxyError(415, 'unsupported_content_encoding', 'Compressed request bodies are not supported.');
   }
   if (Number(req.headers['content-length']) > limit) {
-    throw new ProxyError(413, 'body_too_large', `Request body exceeds ${limit} bytes.`);
+    throw bodyTooLarge(limit);
   }
   let size = 0;
   const chunks = [];
   for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     size += chunk.length;
-    if (size > limit) throw new ProxyError(413, 'body_too_large', `Request body exceeds ${limit} bytes.`);
+    if (size > limit) throw bodyTooLarge(limit);
     chunks.push(chunk);
   }
   try {

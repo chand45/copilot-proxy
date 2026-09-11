@@ -139,9 +139,27 @@ CLI options override environment values.
 | `--model` | `COPILOT_PROXY_MODEL` | None, request must specify it |
 | `--api-key` | `COPILOT_PROXY_API_KEY` | No local bearer requirement |
 | `--auth-file` | `COPILOT_PROXY_AUTH_FILE` | Private OS-specific location below |
-| `--max-body-bytes` | `COPILOT_PROXY_MAX_BODY_BYTES` | `2097152`, 2 MiB |
+| `--max-body-bytes` | `COPILOT_PROXY_MAX_BODY_BYTES` | `512000000`, 512 MB (also the maximum) |
 | `--timeout-ms` | `COPILOT_PROXY_TIMEOUT_MS` | `300000`, whole request including streaming |
 | `--shell` | None | `both` |
+
+### Codex: HTTP 413 Payload Too Large
+
+`Request body exceeds 2097152 bytes` comes from the old 2 MiB default. The proxy rejects the request before contacting Copilot. Conversation history, tool results, or inline images can make Codex Responses requests exceed that limit. The default and maximum are now 512 MB; startup prints the effective limit.
+
+OpenAI's [image-input requirements](https://developers.openai.com/api/docs/guides/images-vision#image-input-requirements) documented up to **512 MB total payload per request** when checked September 6, 2026. The proxy uses decimal MB (`512000000` bytes), which stays below Node's single-string ceiling when parsing ASCII JSON. The [Codex configuration reference](https://developers.openai.com/codex/config-reference/) describes model context and compaction in tokens, without specifying a universal HTTP request byte maximum. Copilot's own request and model limits still apply.
+
+Reinstall this project's updated package before restarting a globally installed proxy: older versions reject values above 64 MiB. Stop the existing server and start the updated copy, preserving any other options you use:
+
+```text
+copilot-proxy start --port 4141 --max-body-bytes 512000000
+```
+
+Alternatively, set `COPILOT_PROXY_MAX_BODY_BYTES=512000000` in the **proxy's** environment before starting it. CLI options override the environment. Editing this checkout or changing the client's environment does not update a running, globally installed proxy. Use `npm start` to run the updated source directly from this checkout.
+
+The allowed range is 1 through `512000000` bytes. Reduce large tool outputs or images, or compact the conversation, for requests above that ceiling. This byte limit is separate from model token/context limits. The proxy buffers and parses JSON in memory, so large requests can use several times their body size in RAM; configure a lower limit on constrained machines.
+
+### Local access
 
 Only `127.0.0.1`, `localhost`, and `::1` are accepted. `localhost` binds `127.0.0.1`. Remote binds are refused even with an API key. Browser-origin requests are rejected; there are no CORS allowances. Host checking also rejects DNS-rebinding hostnames.
 

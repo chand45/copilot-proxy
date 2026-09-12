@@ -1,4 +1,5 @@
 import { ProxyError } from './errors.js';
+import { stabilizeResponseIds } from './response-ids.js';
 
 export function validateBaseUrl(value) {
   let url;
@@ -40,6 +41,6 @@ export function createCopilotUpstream({ auth, headersForRequest, fetchImpl = fet
   return {
     models: signal => send('/models', undefined, signal),
     chat: (body, signal) => send('/chat/completions', body, signal),
-    responses: (body, signal) => send('/responses', body, signal),
+    responses: async (body, signal) => stabilizeResponseIds(await send('/responses', body, signal)),
   };
 }

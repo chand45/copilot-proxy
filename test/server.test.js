@@ -406,3 +406,111 @@ test('mid-stream failure emits a structured error without pretending success', a
   assert.match(content, /upstream_unavailable/);
   assert.doesNotMatch(content, /secret-stream-error|\[DONE\]/);
 });
+
+function postMessages(url, body, headers = {}, query = '') {
+  return fetch(`${url}/v1/messages${query}`, {
+    method: 'POST', headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify(body),
+  });
+}
+
+test('Anthropic Messages preserves tools, thinking, caching and native JSON responses', async t => {
+  const body = {
+    model: 'claude-test', max_tokens: 128,
+    system: [{ type: 'text', text: 'Read files.', cache_control: { type: 'ephemeral' } }],
+    messages: [
+      { role: 'user', content: 'Read a.js.' },
+      { role: 'assistant', content: [
+        { type: 'thinking', thinking: 'Inspect the file.', signature: 'opaque-signature' },
+        { type: 'tool_use', id: 'toolu_1', name: 'read_file', input: { path: 'a.js' } },
+      ] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'export default 1;' }] },
+    ],
+    tools: [{ name: 'read_file', input_schema: { type: 'object', properties: { path: { type: 'string' } } } }],
+    thinking: { type: 'adaptive' }, output_config: { effort: 'high' },
+  };
+  const answer = { id: 'msg_1', type: 'message', role: 'assistant', model: 'claude-test', content: [{ type: 'text', text: 'It exports 1.' }], stop_reason: 'end_turn', usage: { input_tokens: 12, output_tokens: 5, cache_read_input_tokens: 8 } };
+  let calls = 0;
+  const { url } = await fixture(t, { messages: async (actual, signal, options) => {
+    calls++;
+    assert.deepEqual(actual, body);
+    assert.equal(signal.aborted, false);
+    assert.equal(options.beta, true);
+    assert.equal(options.headers['anthropic-beta'], 'test-feature');
+    return Response.json(answer, { headers: { 'request-id': 'req_1' } });
+  } });
+  const response = await postMessages(url, body, { 'anthropic-beta': 'test-feature' }, '?beta=true');
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), answer);
+  assert.equal(response.headers.get('request-id'), 'req_1');
+  assert.equal(calls, 1);
+});
+
+test('Anthropic SSE preserves ping, tool argument and signature deltas byte-for-byte', async t => {
+  const frames = [
+    'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":3}}}\n\n',
+    'event: ping\ndata: {"type":"ping"}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"opaque"}}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"a.js\\"}"}}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":9}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  ];
+  const { url } = await fixture(t, { messages: async () => new Response(new ReadableStream({
+    start(controller) {
+      for (const frame of frames) controller.enqueue(new TextEncoder().encode(frame));
+      controller.close();
+    },
+  }), { headers: { 'content-type': 'text/event-stream' } }) });
+  const response = await postMessages(url, { model: 'claude-test', max_tokens: 128, stream: true, messages: [{ role: 'user', content: 'Hi' }] });
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), frames.join(''));
+});
+
+test('Anthropic local failures use native error shapes and do not call upstream', async t => {
+  let calls = 0;
+  const { url } = await fixture(t, { messages: async () => { calls++; return Response.json({}); } }, { apiKey: 'local-key' });
+  const body = { model: 'claude-test', max_tokens: 16, messages: [{ role: 'user', content: 'Hi' }] };
+  const denied = await postMessages(url, body);
+  assert.equal(denied.status, 401);
+  assert.deepEqual(await denied.json(), { type: 'error', error: { type: 'authentication_error', message: 'A valid local bearer API key is required.' } });
+  const headers = { authorization: 'Bearer local-key' };
+  for (const invalid of [{ ...body, max_tokens: 0 }, { ...body, max_tokens: 1.5 }, { ...body, messages: [] }, { ...body, stream: 'true' }]) {
+    const response = await postMessages(url, invalid, headers);
+    assert.equal(response.status, 400);
+    const error = await response.json();
+    assert.equal(error.type, 'error');
+    assert.equal(error.error.type, 'invalid_request_error');
+  }
+  const count = await fetch(`${url}/v1/messages/count_tokens`, { method: 'POST', headers });
+  assert.equal(count.status, 404);
+  assert.equal((await count.json()).error.type, 'not_found_error');
+  assert.equal(calls, 0);
+});
+
+test('Anthropic upstream capability errors retain details needed by Claude Code', async t => {
+  const failure = { type: 'error', error: { type: 'invalid_request_error', message: 'thinking: adaptive is not supported' }, request_id: 'req_failure' };
+  const { url } = await fixture(t, { messages: async () => Response.json(failure, {
+    status: 400, headers: { 'request-id': 'req_failure', 'retry-after': '3', authorization: 'Bearer upstream-secret' },
+  }) });
+  const response = await postMessages(url, { model: 'claude-test', max_tokens: 16, messages: [{ role: 'user', content: 'Hi' }] });
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), failure);
+  assert.equal(response.headers.get('request-id'), 'req_failure');
+  assert.equal(response.headers.get('retry-after'), '3');
+  assert.equal(response.headers.get('authorization'), null);
+});
+
+test('Anthropic mid-stream network failures emit native error events without message_stop', async t => {
+  const { url } = await fixture(t, { messages: async () => new Response(new ReadableStream({
+    async start(controller) {
+      controller.enqueue(new TextEncoder().encode('event: ping\ndata: {"type":"ping"}\n\n'));
+      await delay(20);
+      controller.error(new Error('secret-stream-error'));
+    },
+  }), { headers: { 'content-type': 'text/event-stream' } }) });
+  const response = await postMessages(url, { model: 'claude-test', max_tokens: 16, stream: true, messages: [{ role: 'user', content: 'Hi' }] });
+  const content = await response.text();
+  assert.match(content, /event: error\ndata: {"type":"error","error":{"type":"api_error"/);
+  assert.doesNotMatch(content, /secret-stream-error|message_stop|\[DONE\]/);
+});

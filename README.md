@@ -1,6 +1,6 @@
 # copilot-proxy
 
-A local OpenAI-compatible HTTP endpoint backed by your GitHub Copilot subscription. It uses published Pi OAuth code for explicit device login and token refresh, then relays requests directly to Copilot.
+A local OpenAI- and Anthropic-compatible HTTP endpoint backed by your GitHub Copilot subscription. It uses published Pi OAuth code for explicit device login and token refresh, then relays requests directly to Copilot.
 
 Requires Node.js **22.19.0 or newer**, npm, a GitHub.com account with Copilot access, and a model enabled for that account. This is an unofficial integration, not a GitHub-supported API gateway. It does not grant access beyond your subscription or bypass organization policies, premium-request billing, quotas, or rate limits. Check the current [Copilot terms](https://docs.github.com/en/site-policy/github-terms/github-terms-for-additional-products-and-features#github-copilot) and your organization's rules before using it.
 
@@ -107,9 +107,26 @@ wire_api = "responses"
 
 Replace the model placeholder with an account-enabled Responses model. The proxy does not edit client configuration. Clients requiring Responses WebSockets or extra API routes are not supported.
 
+### Claude Code
+
+[Claude Code](https://code.claude.com/docs/en/llm-gateway-connect) can use the native Anthropic Messages route. In a second PowerShell terminal, choose exact model IDs from the live catalog whose `supported_endpoints` includes `/v1/messages`:
+
+```powershell
+$env:ANTHROPIC_BASE_URL = 'http://127.0.0.1:4141'
+$env:ANTHROPIC_AUTH_TOKEN = 'copilot-proxy'
+$env:ANTHROPIC_DEFAULT_SONNET_MODEL = 'YOUR_COPILOT_SONNET_MODEL_ID'
+$env:ANTHROPIC_DEFAULT_OPUS_MODEL = 'YOUR_COPILOT_OPUS_MODEL_ID'
+$env:ANTHROPIC_DEFAULT_HAIKU_MODEL = 'YOUR_COPILOT_HAIKU_MODEL_ID'
+claude --model sonnet
+```
+
+Use the base URL without `/v1`; Claude Code appends `/v1/messages`. If local bearer authentication is enabled, replace the dummy token with your local proxy key, never a GitHub or Copilot token. These environment settings can also be saved under `env` in Claude Code's user settings file. Existing Claude account credentials are not needed for this route.
+
+The proxy preserves native tools, tool results, thinking signatures, prompt caching, JSON responses, and SSE events. It forwards `anthropic-version` (default `2023-06-01`), `anthropic-beta`, and `?beta=true`; Copilot determines which model features and beta flags it accepts. Pi's Copilot dynamic-header helper is reused, with native tool-result turns classified as agent continuations. Token counting (`/v1/messages/count_tokens`) is not implemented; Claude Code falls back to estimates. No protocol translation or model substitution is performed.
+
 `GET /v1/models` returns the live, authenticated Copilot catalog with an OpenAI `object: "list"` envelope and `object: "model"`, `created`, and `owned_by` fields on each entry. Copilot's extra metadata is preserved. Missing creation times use `0`; missing ownership uses the vendor or `github-copilot`.
 
-The catalog is not a promise that every listed model works with every API. It can include models requiring a different protocol. In the pinned Pi catalog, GPT-5 models use Responses, GPT-4.1 and several Gemini models use Chat Completions, and most Claude models use Anthropic Messages. **This proxy does not implement Anthropic `/v1/messages`.** Check the returned model metadata and Copilot's current availability; do not choose Claude merely because it appears in the list.
+The catalog is not a promise that every listed model works with every API. It can include models requiring a different protocol. In the pinned Pi catalog, GPT-5 models use Responses, GPT-4.1 and several Gemini models use Chat Completions, and most Claude models use Anthropic Messages. Check the live catalog's `supported_endpoints` and account policy before choosing a model.
 
 Specify `model` in each request or set `COPILOT_PROXY_MODEL` / `--model`. There is no guessed default. The proxy does not silently substitute models, convert requests between protocols, or retry failed generation requests.
 
@@ -121,12 +138,13 @@ Specify `model` in each request or set `COPILOT_PROXY_MODEL` / `--model`. There 
 | `GET /v1/models` | Authenticated, live Copilot catalog. |
 | `POST /v1/chat/completions` | JSON or OpenAI SSE, including tool calls/results, tool argument deltas, finish reasons and usage. |
 | `POST /v1/responses` | HTTP JSON or Responses SSE for models supporting that endpoint. Tool items and events pass through. |
+| `POST /v1/messages` | Native Anthropic JSON or SSE, including tools, thinking, caching and usage. |
 
 Successful generation JSON bodies and message content pass through without translation. Responses SSE streams retain the first provider-issued response ID and item ID per `output_index` throughout added, delta, done, and completed events. This repairs Copilot streams that re-encode IDs per event, which otherwise produce duplicate progress messages in Codex. Stable SSE frames remain byte-for-byte unchanged. Tool `call_id` values, encrypted reasoning, and request bodies are preserved for conversation replay. The proxy preserves parameters such as `tools`, `tool_choice`, `stream_options`, reasoning settings and `response_format`; the upstream model decides which ones it accepts. Image content is forwarded and marked for Copilot when present. No guarantee is made that every OpenAI feature or coding agent is compatible.
 
-Unsupported APIs include Anthropic Messages, legacy Completions, embeddings, audio, images generation, files, batches, Assistants, Responses retrieval/deletion, and WebSocket transports. Only Responses creation over HTTP is implemented. The proxy does not implement server-side conversation storage; upstream support determines whether `store` or `previous_response_id` works.
+Unsupported APIs include Anthropic token counting, legacy Completions, embeddings, audio, images generation, files, batches, Assistants, Responses retrieval/deletion, and WebSocket transports. Only Responses creation over HTTP is implemented. The proxy does not implement server-side conversation storage; upstream support determines whether `store` or `previous_response_id` works.
 
-Errors use an OpenAI-shaped `error` object. Upstream failure status and selected rate-limit/request-ID headers are preserved, but raw upstream error bodies are replaced with a safe message to avoid leaking tokens. A timeout returns HTTP 504 before streaming starts. After streaming starts, failures produce a final SSE error without a fake `[DONE]` success marker. A client disconnect aborts its upstream request. Shared refresh continues for other waiting clients.
+Local errors use the requested API's error format. Upstream failure status and selected rate-limit/request-ID headers are preserved. Native Anthropic error types and messages are retained so Claude Code can recognize unsupported capabilities and retry, with the Copilot token redacted and unrelated body fields discarded. Other upstream error bodies are replaced with a safe message. A timeout returns HTTP 504 before streaming starts. After streaming starts, failures produce an API-appropriate SSE error without a fake completion marker. A client disconnect aborts its upstream request. Shared refresh continues for other waiting clients.
 
 ## Configuration
 

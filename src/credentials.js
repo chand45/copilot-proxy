@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { ProxyError } from './errors.js';
 
@@ -12,11 +12,15 @@ async function restrictFile(path) {
     await chmod(path, 0o600);
     return;
   }
-  const { stdout } = await execute('whoami.exe', ['/user', '/fo', 'csv', '/nh'], { windowsHide: true });
+  const windowsRoot = process.env.SystemRoot || process.env.WINDIR;
+  if (!windowsRoot || !isAbsolute(windowsRoot)) throw new Error('Could not determine the Windows system directory.');
+  const systemDirectory = join(windowsRoot, 'System32');
+  // Git Bash can put incompatible utilities ahead of Windows utilities on PATH.
+  const { stdout } = await execute(join(systemDirectory, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { windowsHide: true });
   const sid = stdout.match(/S-1-(?:\d+-)+\d+/)?.[0];
   if (!sid) throw new Error('Could not determine current Windows user.');
   // The new, empty file has inherited entries only. Remove them before writing secrets.
-  await execute('icacls.exe', [path, '/inheritance:r', '/grant:r', `*${sid}:F`], { windowsHide: true });
+  await execute(join(systemDirectory, 'icacls.exe'), [path, '/inheritance:r', '/grant:r', `*${sid}:F`], { windowsHide: true });
 }
 
 function validCredentials(credentials) {

@@ -8,7 +8,7 @@ import { createCopilotUpstream } from './upstream.js';
 import { ProxyError } from './errors.js';
 
 const help = `copilot-proxy ${packageJson.version}
-Local OpenAI-compatible HTTP endpoint for GitHub Copilot.
+Local OpenAI- and Anthropic-compatible HTTP endpoint for GitHub Copilot.
 
 Usage:
   copilot-proxy login --accept-model-policy-changes
@@ -47,6 +47,7 @@ Routes:
   GET /v1/models           Authenticated Copilot model catalog
   POST /v1/chat/completions   JSON or OpenAI SSE
   POST /v1/responses          JSON or Responses SSE, supported models only
+  POST /v1/messages           JSON or Anthropic SSE, supported models only
 
 Credentials default to %LOCALAPPDATA%\\copilot-proxy\\auth.json on Windows
 or $XDG_CONFIG_HOME/copilot-proxy/auth.json (~/.config when unset) elsewhere.

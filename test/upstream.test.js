@@ -25,6 +25,162 @@ test('Copilot dynamic headers classify tool turns, Responses input, and images',
   assert.equal(headersForRequest({ messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.invalid/fake.png' } }] }] })['Copilot-Vision-Request'], 'true');
 });
 
+test('native Anthropic tool results use agent headers and retain nested image detection', async () => {
+  const { headersForRequest } = await createPiIntegration();
+  const body = {
+    messages: [{
+      role: 'user',
+      content: [{
+        type: 'tool_result', tool_use_id: 'toolu_1',
+        content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'fake' } }],
+      }],
+    }],
+  };
+  const original = structuredClone(body);
+  const headers = headersForRequest(body);
+  assert.equal(headers['X-Initiator'], 'agent');
+  assert.equal(headers['Copilot-Vision-Request'], 'true');
+  assert.equal(headers['Openai-Intent'], 'conversation-edits');
+  assert.deepEqual(body, original);
+  const textResult = headersForRequest({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'done' }] }] });
+  assert.equal(textResult['X-Initiator'], 'agent');
+  assert.equal(textResult['Copilot-Vision-Request'], undefined);
+  assert.equal(headersForRequest({ messages: [...body.messages, { role: 'user', content: 'Now explain it.' }] })['X-Initiator'], 'user');
+  assert.equal(headersForRequest({ messages: [{ role: 'user', content: [{ type: 'text', text: 'Hi' }] }] })['X-Initiator'], 'user');
+});
+
+test('Messages forwards native payloads with allowlisted headers and Copilot authentication', async () => {
+  const calls = [];
+  const signal = new AbortController().signal;
+  const upstreamResponse = Response.json({ type: 'message', content: [{ type: 'text', text: 'Hello' }] });
+  const upstream = createCopilotUpstream({
+    auth: { getAuth: async requestSignal => {
+      assert.equal(requestSignal, signal);
+      return { apiKey: 'fake-copilot-token', baseUrl: 'https://api.business.githubcopilot.com' };
+    } },
+    headersForRequest: () => ({ 'Copilot-Integration-Id': 'vscode-chat', 'X-Initiator': 'agent' }),
+    fetchImpl: async (url, init) => {
+      calls.push({ url: url.href, ...init, headers: new Headers(init.headers) });
+      return upstreamResponse;
+    },
+  });
+  const body = {
+    model: 'claude-test', max_tokens: 2048,
+    system: [{ type: 'text', text: 'Keep this exactly.', cache_control: { type: 'ephemeral' } }],
+    messages: [
+      { role: 'assistant', content: [
+        { type: 'thinking', thinking: 'Plan', signature: 'opaque-signature' },
+        { type: 'tool_use', id: 'toolu_1', name: 'read', input: { path: 'a.js' } },
+      ] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'done' }] },
+    ],
+    tools: [{ name: 'read', input_schema: { type: 'object', properties: { path: { type: 'string' } } } }],
+    thinking: { type: 'adaptive' }, metadata: { user_id: 'test' }, future_option: { preserve: true },
+  };
+  const original = structuredClone(body);
+  const response = await upstream.messages(body, signal, {
+    beta: true,
+    headers: {
+      'Anthropic-Version': '2023-06-02', 'ANTHROPIC-BETA': 'test-beta,other-beta',
+      Authorization: 'Bearer fake-client-token', 'x-api-key': 'fake-client-key',
+      'X-Initiator': 'user', 'Copilot-Integration-Id': 'untrusted', 'x-arbitrary': 'drop-me',
+    },
+  });
+  assert.equal(response, upstreamResponse);
+  assert.equal(calls[0].url, 'https://api.business.githubcopilot.com/v1/messages?beta=true');
+  assert.equal(calls[0].method, 'POST');
+  assert.equal(calls[0].signal, signal);
+  assert.equal(calls[0].redirect, 'manual');
+  assert.equal(calls[0].headers.get('authorization'), 'Bearer fake-copilot-token');
+  assert.equal(calls[0].headers.get('anthropic-version'), '2023-06-02');
+  assert.equal(calls[0].headers.get('anthropic-beta'), 'test-beta,other-beta');
+  assert.equal(calls[0].headers.get('x-initiator'), 'agent');
+  assert.equal(calls[0].headers.get('copilot-integration-id'), 'vscode-chat');
+  assert.equal(calls[0].headers.get('accept'), 'application/json');
+  assert.equal(calls[0].headers.get('content-type'), 'application/json');
+  assert.equal(calls[0].headers.get('x-api-key'), null);
+  assert.equal(calls[0].headers.get('x-arbitrary'), null);
+  assert.deepEqual(JSON.parse(calls[0].body), original);
+  assert.deepEqual(body, original);
+});
+
+test('Messages defaults its version, leaves beta opt-in, and returns native SSE unchanged', async () => {
+  const calls = [];
+  const sse = 'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1"}}\n\nevent: future_event\ndata: {"type":"future_event","opaque":true}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n';
+  const upstream = createCopilotUpstream({
+    auth: { getAuth: async () => ({ apiKey: 'fake-copilot-token', baseUrl: 'https://api.individual.githubcopilot.com' }) },
+    headersForRequest: () => ({}),
+    fetchImpl: async (url, init) => {
+      calls.push({ url: url.href, headers: new Headers(init.headers) });
+      return new Response(sse, { headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+  const response = await upstream.messages({ model: 'claude-test', messages: [], stream: true }, new AbortController().signal);
+  assert.equal(calls[0].url, 'https://api.individual.githubcopilot.com/v1/messages');
+  assert.equal(calls[0].headers.get('anthropic-version'), '2023-06-01');
+  assert.equal(calls[0].headers.get('anthropic-beta'), null);
+  assert.equal(calls[0].headers.get('accept'), 'text/event-stream');
+  assert.equal(await response.text(), sse);
+});
+
+test('Messages errors retain capability details while removing secrets and arbitrary fields', async () => {
+  const token = 'fake-upstream-secret';
+  const upstream = createCopilotUpstream({
+    auth: { getAuth: async () => ({ apiKey: token, baseUrl: 'https://api.individual.githubcopilot.com' }) },
+    headersForRequest: () => ({}),
+    fetchImpl: async () => Response.json({
+      type: 'error',
+      error: {
+        type: 'invalid_request_error',
+        message: `Unsupported beta capability for bearer ${token}; token=${token}`,
+        debug: { authorization: token },
+      },
+      secret: token, request: { headers: { authorization: token } },
+    }, { status: 400, headers: {
+      'retry-after': '2', 'x-request-id': 'request-1', 'x-ratelimit-remaining': '0',
+      'content-length': '9000', 'content-encoding': 'gzip', 'x-debug-secret': token,
+    } }),
+  });
+  const response = await upstream.messages({ model: 'claude-test' }, new AbortController().signal);
+  assert.equal(response.status, 400);
+  assert.equal(response.headers.get('retry-after'), '2');
+  assert.equal(response.headers.get('x-request-id'), 'request-1');
+  assert.equal(response.headers.get('x-ratelimit-remaining'), '0');
+  assert.equal(response.headers.get('content-length'), null);
+  assert.equal(response.headers.get('content-encoding'), null);
+  assert.equal(response.headers.get('x-debug-secret'), null);
+  assert.deepEqual(await response.json(), {
+    type: 'error', error: {
+      type: 'invalid_request_error',
+      message: 'Unsupported beta capability for bearer [redacted]; token=[redacted]',
+    },
+  });
+});
+
+test('Messages malformed and non-native errors use a safe Anthropic fallback', async () => {
+  for (const failure of [
+    { body: 'not-json fake-upstream-secret', contentType: 'application/json', status: 400 },
+    { body: '{"error":{"message":"fake-upstream-secret"},"debug":"secret"}', contentType: 'application/json', status: 503 },
+    { body: '<html>fake-upstream-secret</html>', contentType: 'text/html', status: 302 },
+  ]) {
+    const upstream = createCopilotUpstream({
+      auth: { getAuth: async () => ({ apiKey: 'fake-upstream-secret', baseUrl: 'https://api.individual.githubcopilot.com' }) },
+      headersForRequest: () => ({}),
+      fetchImpl: async () => new Response(failure.body, { status: failure.status, headers: { 'content-type': failure.contentType } }),
+    });
+    const response = await upstream.messages({ model: 'claude-test' }, new AbortController().signal);
+    assert.equal(response.status, failure.status === 302 ? 502 : failure.status);
+    assert.match(response.headers.get('content-type'), /application\/json/);
+    const body = await response.json();
+    assert.deepEqual(body, {
+      type: 'error', error: {
+        type: response.status >= 500 ? 'api_error' : 'invalid_request_error',
+        message: `Copilot returned HTTP ${failure.status}. Check subscription access, model support, request parameters, or rate limits.`,
+      },
+    });
+  }
+});
+
 test('untrusted credential endpoints cannot receive tokens', () => {
   assert.equal(validateBaseUrl('https://api.individual.githubcopilot.com').origin, 'https://api.individual.githubcopilot.com');
   for (const url of [

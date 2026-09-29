@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { chmod, copyFile, mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 import { createCredentialStore } from '../src/credentials.js';
+
+const execute = promisify(execFile);
 
 async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'copilot-proxy-store-test-'));
@@ -27,6 +31,32 @@ test('credential writes are private, atomic, replaceable and round-trip provider
   assert.deepEqual(await store.load(), second);
   assert.deepEqual(await readdir(dir), ['auth.json']);
   if (process.platform !== 'win32') assert.equal((await stat(path)).mode & 0o777, 0o600);
+});
+
+test('Windows credential writes ignore PATH-shadowed system utilities', { skip: process.platform !== 'win32' }, async t => {
+  const { dir, path, store } = await fixture(t);
+  const shadow = join(dir, 'shadow');
+  await mkdir(shadow);
+  const systemDirectory = join(process.env.SystemRoot || process.env.WINDIR, 'System32');
+  // A real executable with incompatible arguments catches accidental PATH lookup.
+  for (const name of ['whoami.exe', 'icacls.exe']) {
+    await copyFile(join(systemDirectory, 'where.exe'), join(shadow, name));
+  }
+  const env = { ...process.env };
+  const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path') || 'PATH';
+  env[pathKey] = `${shadow};${env[pathKey] || ''}`;
+  await assert.rejects(execute('whoami.exe', ['/user', '/fo', 'csv', '/nh'], { env, windowsHide: true }));
+  await assert.rejects(execute('icacls.exe', [path, '/inheritance:r'], { env, windowsHide: true }));
+  const credentials = { type: 'oauth', access: 'fake-access', refresh: 'fake-refresh', expires: 12345 };
+  const script = `
+    import { createCredentialStore } from ${JSON.stringify(new URL('../src/credentials.js', import.meta.url).href)};
+    await createCredentialStore(process.argv[1]).save(${JSON.stringify(credentials)});
+  `;
+  await execute(process.execPath, ['--input-type=module', '--eval', script, path], { env, windowsHide: true });
+  assert.deepEqual(await store.load(), credentials);
+  const { stdout } = await execute(join(systemDirectory, 'icacls.exe'), [path], { windowsHide: true });
+  assert.doesNotMatch(stdout, /\(I\)/, 'Saved credentials must not inherit directory permissions.');
+  assert.deepEqual((await readdir(dir)).sort(), ['auth.json', 'shadow']);
 });
 
 test('malformed or oversized credential stores fail explicitly', async t => {

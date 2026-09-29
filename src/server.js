@@ -103,7 +103,7 @@ function modelBody(body, defaultModel) {
 
 function forwardedHeaders(response) {
   const headers = {};
-  for (const name of ['retry-after', 'x-request-id', 'x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset']) {
+  for (const name of ['retry-after', 'request-id', 'x-request-id', 'x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset']) {
     const value = response.headers.get(name);
     if (value) headers[name] = value;
   }
@@ -171,6 +171,7 @@ export function createProxyServer(config, { upstream, log = console.error }) {
     const controller = new AbortController();
     active.add(controller);
     let timedOut = false;
+    let anthropic = false;
     const timeout = setTimeout(() => {
       timedOut = true;
       controller.abort();
@@ -183,8 +184,10 @@ export function createProxyServer(config, { upstream, log = console.error }) {
     req.once('aborted', disconnect);
     res.once('close', disconnect);
     try {
+      const requestUrl = new URL(req.url, 'http://localhost');
+      const path = requestUrl.pathname;
+      anthropic = path === '/v1/messages' || path === '/v1/messages/count_tokens';
       checkRequest(req, config, server.address().port);
-      const path = new URL(req.url, 'http://localhost').pathname;
       if (path === '/health') {
         if (req.method !== 'GET') throw new ProxyError(405, 'method_not_allowed', 'Use GET for /health.');
         sendJson(res, 200, { status: 'ok', service: 'copilot-proxy' });
@@ -206,10 +209,25 @@ export function createProxyServer(config, { upstream, log = console.error }) {
         const body = responsesBody(await readJson(req, config.maxBodyBytes), config.model);
         streaming = body.stream === true;
         response = await upstream.responses(body, controller.signal);
+      } else if (path === '/v1/messages') {
+        if (req.method !== 'POST') throw new ProxyError(405, 'method_not_allowed', 'Use POST for /v1/messages.');
+        const body = chatBody(await readJson(req, config.maxBodyBytes), config.model);
+        if (!Number.isSafeInteger(body.max_tokens) || body.max_tokens <= 0) {
+          throw new ProxyError(400, 'invalid_max_tokens', 'max_tokens must be a positive integer.');
+        }
+        streaming = body.stream === true;
+        response = await upstream.messages(body, controller.signal, {
+          headers: req.headers, beta: requestUrl.searchParams.get('beta') === 'true',
+        });
       } else {
-        throw new ProxyError(404, 'not_found', 'Supported routes: GET /health, GET /v1/models, POST /v1/chat/completions, POST /v1/responses.');
+        throw new ProxyError(404, 'not_found', 'Supported routes: GET /health, GET /v1/models, POST /v1/chat/completions, POST /v1/responses, POST /v1/messages.');
       }
       if (!response.ok) {
+        // Claude Code uses native error details to retry unsupported capabilities.
+        if (anthropic && response.headers.get('content-type')?.toLowerCase().includes('application/json')) {
+          await relay(response, res, controller.signal, false);
+          return;
+        }
         await response.body?.cancel();
         const status = response.status >= 400 && response.status <= 599 ? response.status : 502;
         sendJson(res, status, errorBody(new ProxyError(
@@ -217,7 +235,7 @@ export function createProxyServer(config, { upstream, log = console.error }) {
           'copilot_upstream_error',
           `Copilot returned HTTP ${response.status}. Check subscription access, model support, request parameters, or rate limits.`,
           status === 401 || status === 403 ? 'authentication_error' : 'api_error',
-        )), forwardedHeaders(response));
+        ), anthropic), forwardedHeaders(response));
         return;
       }
       if (path === '/v1/models') {
@@ -237,13 +255,13 @@ export function createProxyServer(config, { upstream, log = console.error }) {
       if (res.headersSent) {
         if (!res.destroyed && !res.writableEnded) {
           if (res.getHeader('content-type')?.startsWith('text/event-stream')) {
-            res.end(`\n\ndata: ${JSON.stringify(errorBody(safeError))}\n\n`);
+            res.end(`\n\n${anthropic ? 'event: error\n' : ''}data: ${JSON.stringify(errorBody(safeError, anthropic))}\n\n`);
           } else {
             res.destroy();
           }
         }
       } else {
-        sendJson(res, safeError.status, errorBody(safeError), safeError.status === 401 ? { 'www-authenticate': 'Bearer' } : {});
+        sendJson(res, safeError.status, errorBody(safeError, anthropic), safeError.status === 401 ? { 'www-authenticate': 'Bearer' } : {});
       }
     } finally {
       clearTimeout(timeout);

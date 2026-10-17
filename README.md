@@ -107,6 +107,12 @@ wire_api = "responses"
 
 Replace the model placeholder with an account-enabled Responses model. The proxy does not edit client configuration. Clients requiring Responses WebSockets or extra API routes are not supported.
 
+### Codex Remote adapter (Windows)
+
+The optional [Codex Remote adapter](codex-copilot-adapter/README.md) connects phone-created Codex Remote chats to a Copilot Proxy already running on the destination desktop. The folder includes the adapter, prerequisite checks, installation and rollback scripts, and local tests. It requires Node.js **24 or newer**.
+
+Clone this repository or copy the entire `codex-copilot-adapter` folder to the destination, follow its [setup instructions](codex-copilot-adapter/README.md#install-on-the-other-desktop), then run `Install.cmd`. The adapter listens on loopback port 4142 and forwards to the proxy on port 4141. Installing it changes that user's built-in `openai` provider route; `Rollback.cmd` restores the prior setting. This optional component is distributed in the repository, separately from the proxy's npm tarball.
+
 ### Claude Code
 
 [Claude Code](https://code.claude.com/docs/en/llm-gateway-connect) can use the native Anthropic Messages route. In a second PowerShell terminal, choose exact model IDs from the live catalog whose `supported_endpoints` includes `/v1/messages`:

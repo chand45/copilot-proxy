@@ -1,0 +1,2 @@
+# Keep Windows command launchers usable in checkouts on any platform.
+*.cmd text eol=crlf

@@ -1,6 +1,6 @@
 # Original package verification
 
-This is the historical verification record for the source ZIP, produced in the "Package remote session adapter" chat. The repository import preserves its runtime, installer, prerequisite checker, command launchers, and tests unchanged; documentation has been adapted for the repository. The checks below describe the original packaging run, not a new installation from this checkout.
+This is the historical verification record for the source ZIP, produced in the "Package remote session adapter" chat. The runtime and tests have since changed to fix socket resets and support the combined npm installation. The checks below describe the original packaging run, not the current installation from this checkout.
 
 Package: `codex-copilot-adapter-windows-v1.0.0.zip`
 

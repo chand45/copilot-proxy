@@ -18,9 +18,13 @@ async function fixture(t, handler, options = {}) {
   const upstreamPort = await listen(upstream);
   const adapter = createAdapter({ upstream: `http://127.0.0.1:${upstreamPort}`, proxyKey: KEY, credentials: async () => TOKEN, log: e => logs.push(e), ...options });
   const port = await listen(adapter);
-  t.after(() => { adapter.closeAllConnections(); adapter.close(); upstream.closeAllConnections(); upstream.close(); });
+  t.after(async () => {
+    if (adapter.listening) await adapter.shutdown();
+    upstream.closeAllConnections();
+    await new Promise(resolve => upstream.close(resolve));
+  });
   const request = (path = '/v1/responses', overrides = {}) => fetch(`http://127.0.0.1:${port}${path}`, { method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json', 'chatgpt-account-id': 'must-not-forward', 'x-secret-test': 'must-not-forward' }, body: JSON.stringify({ model: 'gpt-6-astra', input: 'SECRET_PROMPT', stream: true }), ...overrides });
-  return { request, port, seen, logs };
+  return { request, port, seen, logs, adapter };
 }
 const sse = (req, res) => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end('event: response.completed\ndata: {"type":"response.completed","response":{"output":[]}}\n\n'); };
 test('zstd request is decoded; only the proxy credential and allowlisted headers leave the adapter', async t => {
@@ -65,6 +69,59 @@ test('only authenticated WebSocket upgrades receive the Codex HTTP-fallback stat
   assert.match(await upgrade(f.port,TOKEN),/^HTTP\/1.1 426 /);
   assert.match(await upgrade(f.port,'invalid'),/^HTTP\/1.1 401 /); assert.equal(f.seen.length,0);
 });
+
+test('a TCP reset during WebSocket authorization does not crash the adapter', { timeout: 5000 }, async t => {
+  for (const rejectAuth of [false, true]) {
+    await t.test(rejectAuth ? 'failed authorization' : 'successful authorization', async t => {
+      let started, release;
+      const entered = new Promise(resolve => { started = resolve; });
+      const pending = new Promise(resolve => { release = resolve; });
+      let first = true;
+      const f = await fixture(t, sse, { credentials: async () => {
+        if (first) {
+          first = false; started(); await pending;
+          if (rejectAuth) throw new Error('test login unavailable');
+        }
+        return TOKEN;
+      } });
+      t.after(release);
+      const closed = new Promise(resolve => f.adapter.once('upgrade', (_req, socket) => socket.once('close', resolve)));
+      const socket = net.connect(f.port, '127.0.0.1');
+      socket.on('error', () => {});
+      t.after(() => socket.destroy());
+      await once(socket, 'connect');
+      socket.write(`GET /v1/responses HTTP/1.1\r\nHost: 127.0.0.1:${f.port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nAuthorization: Bearer ${TOKEN}\r\n\r\n`);
+      await entered;
+      socket.resetAndDestroy();
+      await closed;
+      release();
+      const health = await fetch(`http://127.0.0.1:${f.port}/health`);
+      assert.equal((await health.json()).status, 'ok');
+      const response = await f.request();
+      assert.equal(response.status, 200);
+      assert.match(await response.text(), /response.completed/);
+    });
+  }
+});
+test('shutdown closes an upgraded socket while authorization is still pending', { timeout: 5000 }, async t => {
+  let entered, release;
+  const started = new Promise(resolve => { entered = resolve; });
+  const pending = new Promise(resolve => { release = resolve; });
+  const f = await fixture(t, sse, { credentials: async () => { entered(); await pending; return TOKEN; } });
+  t.after(release);
+  const socket = net.connect(f.port, '127.0.0.1');
+  socket.on('error', () => {});
+  t.after(() => socket.destroy());
+  await once(socket, 'connect');
+  socket.write(`GET /v1/responses HTTP/1.1\r\nHost: 127.0.0.1:${f.port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nAuthorization: Bearer ${TOKEN}\r\n\r\n`);
+  await started;
+  const closed = new Promise(resolve => socket.once('close', resolve));
+  await f.adapter.shutdown();
+  await closed;
+  release();
+  assert.equal(f.seen.length, 0);
+});
+
 test('raw and expanded body limits, invalid compression and invalid JSON fail before forwarding', async t => {
   const f = await fixture(t,sse,{maxBodyBytes:200});
   const cases = [

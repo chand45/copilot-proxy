@@ -1,5 +1,54 @@
 import { ProxyError } from './errors.js';
 
+function authFailure(error, operation, signal) {
+  const action = operation === 'login' ? 'GitHub Copilot login' : 'Copilot token refresh';
+  const retry = operation === 'login'
+    ? 'Retry copilot-proxy login --accept-model-policy-changes.'
+    : 'Retry the request; signing in again is not required for this error.';
+  const login = 'Run copilot-proxy login --accept-model-policy-changes.';
+  const failure = (status, message, type = 'server_error') =>
+    new ProxyError(status, `${operation}_failed`, `${action} failed. ${message}`, type);
+  const message = typeof error?.message === 'string' ? error.message : '';
+
+  if (signal?.reason?.name === 'TimeoutError' || error?.name === 'TimeoutError') {
+    return failure(504, `The authentication request timed out. ${retry}`);
+  }
+  if (signal?.aborted || error?.name === 'AbortError' || message === 'Login cancelled') {
+    return failure(401, `Authentication was cancelled. ${login}`, 'authentication_error');
+  }
+  if (message.startsWith('Device flow timed out')) {
+    const clock = message.includes('slow_down') ? ' Check the system clock if this keeps happening.' : '';
+    return failure(401, `The device login code expired before authorization completed.${clock} ${login}`, 'authentication_error');
+  }
+  if (/^Device flow failed: expired_token(?::|$)/.test(message)) {
+    return failure(401, `The device login code expired. ${login}`, 'authentication_error');
+  }
+  if (/^Device flow failed: access_denied(?::|$)/.test(message)) {
+    return failure(403, `Device authorization was denied. Approve the device login in your browser only if you intended to sign in. ${login}`, 'authentication_error');
+  }
+  // Pi includes raw response bodies in HTTP errors. Extract only the status, never the body.
+  const status = Number(message.match(/^([45]\d{2})\b/)?.[1]);
+  if (status === 401) {
+    return failure(401, `GitHub/Copilot rejected authentication (HTTP 401). ${login}`, 'authentication_error');
+  }
+  if (status === 403) {
+    return failure(403, 'GitHub/Copilot denied access (HTTP 403). Check Copilot subscription access and organization policies.', 'authentication_error');
+  }
+  if (status === 429) {
+    return failure(429, `GitHub/Copilot rate-limited authentication (HTTP 429). Wait before retrying. ${retry}`, 'rate_limit_error');
+  }
+  if (status >= 500) {
+    return failure(status, `GitHub/Copilot returned HTTP ${status}. ${retry}`);
+  }
+  if (status) {
+    return failure(502, `GitHub/Copilot returned HTTP ${status} during authentication. Check proxy/provider compatibility before retrying.`);
+  }
+  if (message === 'fetch failed') {
+    return failure(502, `Could not reach GitHub/Copilot. Check network, proxy, and TLS certificate settings. ${retry}`);
+  }
+  return failure(502, 'The authentication provider failed without a recognized error. Retry; if it persists, check network connectivity, Copilot access, and proxy/provider compatibility.');
+}
+
 async function withAbort(promise, signal) {
   if (!signal) return promise;
   signal.throwIfAborted();
@@ -25,10 +74,11 @@ export function createAuthManager({ store, provider, now = Date.now }) {
     if (!refreshPromise) {
       refreshPromise = (async () => {
         let refreshed;
+        const signal = AbortSignal.timeout(60000);
         try {
-          refreshed = await provider.refresh(current, AbortSignal.timeout(60000));
-        } catch {
-          throw new ProxyError(401, 'refresh_failed', 'Copilot authentication could not be refreshed. Run copilot-proxy login --accept-model-policy-changes.', 'authentication_error');
+          refreshed = await provider.refresh(current, signal);
+        } catch (error) {
+          throw authFailure(error, 'refresh', signal);
         }
         await store.save(refreshed);
         return refreshed;
@@ -53,8 +103,8 @@ export function createAuthManager({ store, provider, now = Date.now }) {
       let value;
       try {
         value = await provider.login(callbacks);
-      } catch {
-        throw new ProxyError(401, 'login_failed', 'GitHub Copilot login failed or was cancelled. Retry copilot-proxy login --accept-model-policy-changes.', 'authentication_error');
+      } catch (error) {
+        throw authFailure(error, 'login', callbacks.signal);
       }
       await store.save(value);
     },

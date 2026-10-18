@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import packageJson from '../package.json' with { type: 'json' };
 import { DEFAULT_MAX_BODY_BYTES, parseArgs, endpoint, environmentSetup } from './config.js';
-import { createProxyServer, listen } from './server.js';
 import { createAuthManager } from './auth.js';
 import { createCredentialStore } from './credentials.js';
 import { createCopilotUpstream } from './upstream.js';
 import { ProxyError } from './errors.js';
+import { startServices } from './services.js';
+import { getStatus, formatStatus } from './status.js';
 
 const help = `copilot-proxy ${packageJson.version}
 Local OpenAI- and Anthropic-compatible HTTP endpoint for GitHub Copilot.
@@ -13,17 +14,21 @@ Local OpenAI- and Anthropic-compatible HTTP endpoint for GitHub Copilot.
 Usage:
   copilot-proxy login --accept-model-policy-changes
   copilot-proxy start [options]
+  copilot-proxy status [--port PORT] [--adapter-port PORT]
   copilot-proxy env [--shell powershell|bash|both]
   copilot-proxy --help
 
 Commands:
-  start    Start the loopback server. This is the default command.
+  start    Start model serving and the Codex Remote adapter. Default command.
+  status   Check both local listeners. No login or model request required.
   login    Explicit GitHub.com device login using Pi OAuth.
   env      Print client environment commands. Does not change your shell.
 
 Options:
   --host HOST              127.0.0.1, localhost, or ::1. Default: 127.0.0.1
   --port PORT              Listen port, 0 chooses a free port. Default: 4141
+  --adapter-port PORT      Adapter port, 0 chooses a free port. Default: 4142
+  --no-adapter             Start only the model-serving endpoint
   --model ID               Default model when a request omits model
   --api-key KEY            Optional local bearer key; prefer the environment
   --auth-file PATH         Private proxy credentials, outside this project
@@ -37,7 +42,7 @@ Options:
   --version                Print the version
 
 Environment:
-  COPILOT_PROXY_HOST, COPILOT_PROXY_PORT, COPILOT_PROXY_MODEL,
+  COPILOT_PROXY_HOST, COPILOT_PROXY_PORT, COPILOT_PROXY_ADAPTER_PORT, COPILOT_PROXY_MODEL,
   COPILOT_PROXY_API_KEY, COPILOT_PROXY_AUTH_FILE,
   COPILOT_PROXY_MAX_BODY_BYTES, COPILOT_PROXY_TIMEOUT_MS
   CLI options override environment values.
@@ -65,6 +70,12 @@ async function main() {
   if (config.command === 'help') return console.log(help);
   if (config.command === 'version') return console.log(packageJson.version);
   if (config.command === 'env') return console.log(environmentSetup(config));
+  if (config.command === 'status') {
+    const rows = await getStatus(config);
+    console.log(formatStatus(rows));
+    if (rows.some(row => row.state !== 'Running')) process.exitCode = 1;
+    return;
+  }
   if (config.command === 'login' && !config.acceptModelPolicyChanges) {
     console.error('Pi login may enable currently unconfigured known Copilot models, but never explicitly disabled models.');
     console.error('To acknowledge this and start device login, run: copilot-proxy login --accept-model-policy-changes');
@@ -103,9 +114,10 @@ async function main() {
     return;
   }
   const upstream = createCopilotUpstream({ auth, headersForRequest: integration.headersForRequest });
-  const server = createProxyServer(config, { upstream });
-  const port = await listen(server, config);
+  const services = await startServices(config, { upstream });
+  const { port, adapterPort } = services;
   console.log(`Copilot proxy listening at ${endpoint(config.host, port)}`);
+  if (adapterPort !== undefined) console.log(`Codex Remote adapter listening at ${endpoint('127.0.0.1', adapterPort)}`);
   console.log(`Request body limit: ${config.maxBodyBytes} bytes (override with --max-body-bytes).`);
   console.log('Login is checked on API requests. /health reports liveness only.');
   console.log(config.apiKey ? 'API routes require your local bearer key.' : 'No local bearer key configured. Only loopback clients can connect.');
@@ -115,7 +127,7 @@ async function main() {
     if (closing) return;
     closing = true;
     try {
-      await server.shutdown();
+      await services.shutdown();
     } catch {
       console.error('Could not shut down the local HTTP server cleanly.');
       process.exitCode = 1;

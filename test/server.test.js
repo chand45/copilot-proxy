@@ -5,6 +5,7 @@ import test from 'node:test';
 import { parseArgs } from '../src/config.js';
 import { ProxyError } from '../src/errors.js';
 import { createProxyServer, listen } from '../src/server.js';
+import { createAuthManager } from '../src/auth.js';
 
 async function fixture(t, upstream = {}, overrides = {}) {
   const calls = [];
@@ -211,6 +212,41 @@ test('missing credentials fail before streaming and never leak exceptions', asyn
   assert.equal(failed.status, 502);
   assert.doesNotMatch(await failed.text(), /secret-upstream-token/);
   assert.doesNotMatch(logs.join(''), /secret-upstream-token/);
+});
+
+test('refresh failures preserve their status through HTTP instead of always demanding login', async t => {
+  let status = 429;
+  const auth = createAuthManager({
+    store: {
+      load: async () => ({ expires: 0 }),
+      save: async () => assert.fail('Failed refresh must not overwrite credentials'),
+    },
+    provider: {
+      refresh: async () => { throw new Error(`${status} Upstream failure: private-upstream-token`); },
+    },
+  });
+  const { url, logs } = await fixture(t, {
+    models: signal => auth.getAuth(signal),
+    messages: (_body, signal) => auth.getAuth(signal),
+  });
+  for (status of [401, 403, 429, 503]) {
+    for (const path of ['/v1/models', '/v1/messages']) {
+      const response = await fetch(`${url}${path}`, path === '/v1/models' ? {} : {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'x', max_tokens: 1, messages: [{ role: 'user', content: 'Hi' }] }),
+      });
+      assert.equal(response.status, status);
+      assert.equal(response.headers.get('www-authenticate'), status === 401 ? 'Bearer' : null);
+      const body = await response.json();
+      assert.match(body.error.message, new RegExp(`HTTP ${status}`));
+      assert.doesNotMatch(JSON.stringify(body), /private-upstream-token/);
+      if (path === '/v1/models') assert.equal(body.error.code, 'refresh_failed');
+      else assert.equal(body.error.type, {
+        401: 'authentication_error', 403: 'permission_error', 429: 'rate_limit_error', 503: 'api_error',
+      }[status]);
+    }
+  }
+  assert.doesNotMatch(logs.join(''), /private-upstream-token/);
 });
 
 test('timeouts abort upstream and return 504 before headers', async t => {

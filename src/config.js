@@ -9,6 +9,7 @@ export const DEFAULT_MAX_BODY_BYTES = MAX_BODY_BYTES;
 const options = new Map([
   ['host', 'COPILOT_PROXY_HOST'],
   ['port', 'COPILOT_PROXY_PORT'],
+  ['adapter-port', 'COPILOT_PROXY_ADAPTER_PORT'],
   ['model', 'COPILOT_PROXY_MODEL'],
   ['api-key', 'COPILOT_PROXY_API_KEY'],
   ['auth-file', 'COPILOT_PROXY_AUTH_FILE'],
@@ -37,10 +38,15 @@ export function parseArgs(argv, env = process.env, cwd = process.cwd()) {
   const values = {};
   let command;
   let acceptModelPolicyChanges = false;
+  let adapterEnabled = true;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--help' || arg === '-h') return { command: 'help' };
     if (arg === '--version') return { command: 'version' };
+    if (arg === '--no-adapter') {
+      adapterEnabled = false;
+      continue;
+    }
     if (arg === '--accept-model-policy-changes') {
       acceptModelPolicyChanges = true;
       continue;
@@ -58,7 +64,7 @@ export function parseArgs(argv, env = process.env, cwd = process.cwd()) {
     values[name] = value;
   }
   command ??= 'start';
-  if (!['start', 'login', 'env'].includes(command)) throw new Error(`Unknown command: ${command}`);
+  if (!['start', 'status', 'login', 'env'].includes(command)) throw new Error(`Unknown command: ${command}`);
   if (acceptModelPolicyChanges && command !== 'login') throw new Error('--accept-model-policy-changes is only available for login.');
   const get = (name, fallback) => values[name] ?? env[options.get(name)] ?? fallback;
   const host = get('host', '127.0.0.1');
@@ -77,7 +83,9 @@ export function parseArgs(argv, env = process.env, cwd = process.cwd()) {
     throw new Error('The credential file must be outside the project directory.');
   }
   const port = integer('Port', get('port', '4141'), 0, 65535);
-  if (command === 'env' && port === 0) throw new Error('env requires the actual port; port 0 is only available when starting the server.');
+  const adapterPort = integer('Adapter port', get('adapter-port', '4142'), 0, 65535);
+  if (['env', 'status'].includes(command) && port === 0) throw new Error(`${command} requires the actual port; port 0 is only available when starting the server.`);
+  if (command === 'status' && adapterPort === 0) throw new Error('status requires the actual adapter port.');
   const shell = get('shell', 'both');
   if (!['both', 'bash', 'powershell'].includes(shell)) throw new Error('--shell must be bash, powershell, or both.');
   return {
@@ -85,6 +93,8 @@ export function parseArgs(argv, env = process.env, cwd = process.cwd()) {
     acceptModelPolicyChanges,
     host: host === 'localhost' ? '127.0.0.1' : host,
     port,
+    adapterEnabled,
+    adapterPort,
     model,
     apiKey,
     authFile,

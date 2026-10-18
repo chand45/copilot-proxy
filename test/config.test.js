@@ -13,6 +13,8 @@ test('defaults are loopback-only with no assumed model', () => {
   assert.equal(config.command, 'start');
   assert.equal(config.host, '127.0.0.1');
   assert.equal(config.port, 4141);
+  assert.equal(config.adapterPort, 4142);
+  assert.equal(config.adapterEnabled, true);
   assert.equal(config.model, '');
   assert.equal(config.apiKey, '');
   assert.equal(config.maxBodyBytes, 512_000_000);
@@ -54,6 +56,9 @@ test('configuration rejects remote binds, invalid limits and project credentials
     ['--host', '192.168.1.1'],
     ['--port', '65536'],
     ['--port', '-1'],
+    ['--adapter-port', '65536'],
+    ['status', '--port', '0'],
+    ['status', '--adapter-port', '0'],
     ['--timeout-ms', 'NaN'],
     ['--max-body-bytes', '0'],
     ['--max-body-bytes', '512000001'],
@@ -66,6 +71,13 @@ test('configuration rejects remote binds, invalid limits and project credentials
   ]) {
     assert.throws(() => parseArgs(args, env, cwd), undefined, args.join(' '));
   }
+});
+
+test('adapter port can be overridden and adapter startup can be disabled explicitly', () => {
+  const config = parseArgs(['start', '--adapter-port', '0', '--no-adapter'], { ...env, COPILOT_PROXY_ADAPTER_PORT: '43210' }, cwd);
+  assert.equal(config.adapterPort, 0);
+  assert.equal(config.adapterEnabled, false);
+  assert.equal(parseArgs(['status'], { ...env, COPILOT_PROXY_ADAPTER_PORT: '43210' }, cwd).adapterPort, 43210);
 });
 
 test('help works even with invalid environment configuration', () => {

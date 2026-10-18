@@ -69,10 +69,11 @@ export function createAdapter({ upstream = 'http://127.0.0.1:4141', proxyKey,
   maxBodyBytes = DEFAULT_LIMIT, timeoutMs = 300000, maxConcurrent = 8,
   log = () => {} } = {}) {
   const target = new URL(upstream);
-  if (target.protocol !== 'http:' || target.hostname !== '127.0.0.1' || !target.port || target.username || target.password || target.pathname !== '/' || target.search || target.hash) throw new Error('Upstream must be a fixed HTTP IPv4 loopback endpoint.');
+  if (target.protocol !== 'http:' || !['127.0.0.1', '[::1]'].includes(target.hostname) || !target.port || target.username || target.password || target.pathname !== '/' || target.search || target.hash) throw new Error('Upstream must be a fixed HTTP loopback endpoint.');
   if (!proxyKey || /[\r\n]/.test(proxyKey)) throw new Error('COPILOT_PROXY_KEY is required.');
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1 || maxBodyBytes > 512000000) throw new Error('Invalid body limit.');
   const active = new Set();
+  const sockets = new Set();
   const counters = { forwarded: 0, completed: 0, failed: 0, websocketFallbacks: 0 };
   const record = (event, fields = {}) => log({ time: new Date().toISOString(), event, ...fields });
   const server = http.createServer(async (req, res) => {
@@ -82,9 +83,10 @@ export function createAdapter({ upstream = 'http://127.0.0.1:4141', proxyKey,
       checkLocal(req, server.address().port);
       path = new URL(req.url, 'http://localhost').pathname;
       if (path === '/health' && req.method === 'GET') {
-        send(res, 200, { service: 'codex-copilot-adapter', version: 1, status: 'ok', pid: process.pid, ...counters }); return;
+        send(res, 200, { service: 'codex-copilot-adapter', version: 1, status: 'ok', pid: process.pid, upstream: target.origin, ...counters }); return;
       }
       await authorize(req, credentials);
+      if (req.destroyed || res.destroyed) return;
       if (!['/v1/responses', '/v1/models'].includes(path)) throw new Failure(404, 'route_not_supported');
       if (req.method !== (path === '/v1/models' ? 'GET' : 'POST')) throw new Failure(405, 'method_not_allowed');
       if (active.size >= maxConcurrent) throw new Failure(503, 'adapter_busy');
@@ -156,15 +158,24 @@ export function createAdapter({ upstream = 'http://127.0.0.1:4141', proxyKey,
       controller?.abort(); active.delete(controller);
     }
   });
+  server.on('connection', socket => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  });
   server.on('upgrade', async (req, socket) => {
+    // Node removes its HTTP socket error listener on upgrade. Own errors before
+    // awaiting credentials: a client can reset the connection during that read.
+    socket.on('error', () => socket.destroy());
     try {
       checkLocal(req, server.address().port); await authorize(req, credentials);
+      if (socket.destroyed) return;
       if (req.method !== 'GET' || new URL(req.url, 'http://localhost').pathname !== '/v1/responses') throw new Failure(404, 'route_not_supported');
       counters.websocketFallbacks++;
       record('websocket_fallback');
       // 426 is Codex's tested signal to retry via HTTP/SSE. A 400 is fatal.
       socket.end('HTTP/1.1 426 Upgrade Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
     } catch (e) {
+      if (socket.destroyed) return;
       const status = e instanceof Failure ? e.status : 503;
       socket.end(`HTTP/1.1 ${status} Rejected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`);
     }
@@ -173,6 +184,13 @@ export function createAdapter({ upstream = 'http://127.0.0.1:4141', proxyKey,
   server.requestTimeout = timeoutMs; server.headersTimeout = Math.min(timeoutMs, 30000);
   server.keepAliveTimeout = 5000; server.maxConnections = 32;
   server.on('close', () => { for (const controller of active) controller.abort(); });
+  server.shutdown = async () => {
+    for (const controller of active) controller.abort();
+    const closed = new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    // closeAllConnections omits upgraded sockets, which are also ours to close.
+    for (const socket of sockets) socket.destroy();
+    await closed;
+  };
   return server;
 }
 

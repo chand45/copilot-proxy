@@ -12,9 +12,14 @@ Install the packaged release globally, then run it from your terminal. See [Pack
 npm install --global ./copilot-proxy-0.1.0.tgz
 copilot-proxy login --accept-model-policy-changes
 copilot-proxy start --port 4141
+copilot-proxy status
 ```
 
 npm installs the `copilot-proxy` command on Windows, macOS, and Linux; no manual shell alias is needed. The npm global binary directory must be on your `PATH`. Running `copilot-proxy` without a command also starts the server. Use `copilot-proxy --help` for all options and `copilot-proxy --version` to check the installed version.
+
+One package includes both runtimes. `copilot-proxy start` starts model serving at `127.0.0.1:4141` and the Codex Remote adapter at `127.0.0.1:4142` in one process. Stopping it closes both listeners. If either port is occupied, startup fails and closes any listener it started. Use `--no-adapter` for model serving alone, or `--adapter-port PORT` (`COPILOT_PROXY_ADAPTER_PORT`) to change the adapter port. The adapter uses the proxy's actual address and configured body limit and timeout, including when `--port 0` chooses a free port.
+
+`copilot-proxy status` checks both local `/health` endpoints with a two-second timeout. It shows **Model serving** and **Codex Remote adapter**, distinguishing running, stopped, unreachable and unexpected services. Exit code 0 means both are running; otherwise it returns 1. No login is needed. This checks local liveness; it does not verify credentials or generate a model response. For custom ports, pass the same `--port` and `--adapter-port` values.
 
 The public npm registry already contains a package named `copilot-proxy`. This project has not been published there. Use this project's tarball until you have confirmed a registry release belongs to this project; `npm install --global copilot-proxy` currently selects the existing registry package.
 
@@ -107,11 +112,17 @@ wire_api = "responses"
 
 Replace the model placeholder with an account-enabled Responses model. The proxy does not edit client configuration. Clients requiring Responses WebSockets or extra API routes are not supported.
 
-### Codex Remote adapter (Windows)
+### Codex Remote adapter
 
-The optional [Codex Remote adapter](codex-copilot-adapter/README.md) connects phone-created Codex Remote chats to a Copilot Proxy already running on the destination desktop. The folder includes the adapter, prerequisite checks, installation and rollback scripts, and local tests. It requires Node.js **24 or newer**.
+The bundled [Codex Remote adapter](codex-copilot-adapter/README.md) connects phone-created Codex Remote chats to Copilot Proxy on the destination desktop. No separate adapter installation is needed. Sign in to Codex with ChatGPT on that desktop, enable Codex Remote, and set this top-level value in the user's Codex `config.toml`:
 
-Clone this repository or copy the entire `codex-copilot-adapter` folder to the destination, follow its [setup instructions](codex-copilot-adapter/README.md#install-on-the-other-desktop), then run `Install.cmd`. The adapter listens on loopback port 4142 and forwards to the proxy on port 4141. Installing it changes that user's built-in `openai` provider route; `Rollback.cmd` restores the prior setting. This optional component is distributed in the repository, separately from the proxy's npm tarball.
+```toml
+openai_base_url = "http://127.0.0.1:4142/v1"
+```
+
+Restart Codex or create a new chat if it retains the old route. Installation and startup do not edit Codex configuration or start a sign-in flow. The adapter reads the current ChatGPT token from `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`) on each request and uses the proxy's configured local key when forwarding. The integrated adapter does not need a separate `COPILOT_PROXY_KEY` variable. ChatGPT credentials and account headers never reach the proxy. Adapter events go to the command's stderr alongside proxy errors, without prompts or credentials.
+
+If you used the older Windows standalone installer, stop its recorded adapter with `Manage-Adapter.ps1 -Action Stop`, remove its separate startup entry with `-Action RemoveStartup`, then use `copilot-proxy start` for both services. Keep the existing routing setting and backups; `Rollback` would restore the old route. The legacy management scripts remain in this repository for that migration, and are not needed by new npm installations.
 
 ### Claude Code
 
@@ -208,6 +219,25 @@ The default store also works when you run the installed command from your home d
 
 Refreshes are deduplicated within a process and saved before use. Run one proxy process per credential file; cross-process refresh coordination is not implemented. If login expires or is revoked, rerun the explicit login command. To sign out locally, stop the server and delete that specific proxy credential file; revoke the OAuth grant in GitHub settings if necessary. Only GitHub.com accounts are supported, not GitHub Enterprise Server/custom enterprise domains.
 
+### Authentication troubleshooting
+
+Older versions report every OAuth failure as `401 refresh_failed` or a generic `login_failed`, even when the cause is a rate limit, network failure, or upstream outage. That message alone does not prove your GitHub login expired. Refresh includes both the GitHub token exchange and a Copilot model-catalog request; either can fail.
+
+The proxy now reports safe diagnostics without printing tokens, device codes outside explicit login, or raw upstream error bodies:
+
+| Error | Action |
+| --- | --- |
+| HTTP 401 from GitHub/Copilot | Run `copilot-proxy login --accept-model-policy-changes` and complete the new device-code flow. |
+| HTTP 403 | Check your account's Copilot access and organization policies. |
+| HTTP 429 | Wait before retrying. A failed refresh does not require another login. |
+| Upstream HTTP 5xx or authentication timeout | Retry later. Existing credentials are not overwritten on failure. |
+| Network failure | Check connectivity, proxy settings, and Node's trusted TLS certificates. Do not disable certificate verification. |
+| Device-code expiry, denial, or cancellation | Start login again and complete the browser authorization before the code expires. Repeated `slow_down` timeouts can indicate system-clock drift. |
+
+Unrecognized provider errors return HTTP 502 rather than claiming your credentials are invalid. The `refresh_failed` and `login_failed` error codes remain unchanged; use the HTTP status and safe message to distinguish the cause. `/health` only checks local liveness. Use `/v1/models` to check authentication without making a generation request.
+
+Changes in this checkout do not update a running globally installed proxy. Use `npm start` from this checkout, or repack and reinstall this project's tarball, then restart the server. There is no need to delete credentials to pick up the fix.
+
 ## Development
 
 ```text
@@ -239,7 +269,7 @@ copilot-proxy login --accept-model-policy-changes
 copilot-proxy start
 ```
 
-The tarball contains the runtime JavaScript, package metadata, and this README. Tests, local outputs, credentials, and `node_modules` are excluded; npm installs the declared dependencies for consumers. `npm run test:package` packs the project, installs it into an isolated temporary global prefix, and exercises the installed command from another directory, including startup and the login acknowledgment check. It may download dependencies, but does not log in or contact Copilot.
+The tarball contains both proxy and adapter runtime JavaScript, package metadata, and this README. Tests, standalone Windows installation scripts, local outputs, credentials, and `node_modules` are excluded; npm installs the declared dependencies for consumers. `npm run test:package` packs the project, installs it into an isolated temporary global prefix, and exercises the installed command from another directory, including both listeners, `status`, and the login acknowledgment check. It may download dependencies, but does not log in or contact Copilot.
 
 The unscoped name `copilot-proxy` is already registered on npm. Publishing under that name requires ownership; alternatively, change the package name to an available scoped name while keeping `bin.copilot-proxy` so the command stays the same. To release with an account that owns the chosen package name:
 

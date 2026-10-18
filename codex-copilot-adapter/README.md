@@ -1,6 +1,6 @@
 # Codex Remote to Copilot Proxy adapter
 
-An optional adapter for a Windows desktop that already has Copilot Proxy working. The adapter has no npm dependencies. Its runtime and installation scripts were imported unchanged from the 17 October 2026 `codex-copilot-adapter-windows-v1.0.0.zip` package. `VERIFICATION.md` in the source folder records the original package checks.
+The adapter is bundled in the Copilot Proxy npm package. One installation and `copilot-proxy start` provide both model serving on port 4141 and the adapter on port 4142. Its runtime has no extra npm dependencies. `VERIFICATION.md` records historical checks of the original standalone Windows package; it does not describe the current integrated installation.
 
 ```
 Phone -> Codex Remote on the destination PC
@@ -8,7 +8,39 @@ Phone -> Codex Remote on the destination PC
       -> that PC's Copilot Proxy at 127.0.0.1:4141
 ```
 
-## Install on the other desktop
+## Install with Copilot Proxy
+
+Install this project's Copilot Proxy tarball as described in the [main README](../README.md#quickstart). No separate `Install.cmd` step is needed. Sign in to Copilot Proxy and Codex with their respective accounts, then run:
+
+```text
+copilot-proxy start
+copilot-proxy status
+```
+
+Configure the user's top-level `openai_base_url = "http://127.0.0.1:4142/v1"` in Codex `config.toml` for built-in OpenAI-provider chats. Package installation and startup leave configuration unchanged. The adapter reloads ChatGPT credentials from `CODEX_HOME` or `~/.codex`, and automatically uses the running proxy's local bearer key. The integrated runtime does not need `COPILOT_PROXY_KEY`.
+
+The command owns both listeners and closes them together. Use `--no-adapter` to serve models alone, or `--adapter-port` to choose another adapter port. The adapter follows the proxy's actual host, port, body limit and timeout. An occupied port prevents startup and releases any listener the command started. Integrated events go to stderr alongside proxy errors. `status` checks local liveness without login or model requests.
+
+The runtime handles a TCP reset during WebSocket authorization without crashing. Its HTTP 426 reply still triggers Codex's HTTP/SSE fallback. To verify the full phone flow, create a new Codex Remote chat and send `Reply with exactly PHONE_PROXY_OK`.
+
+## Migrate an existing standalone Windows installation
+
+Before starting the combined command, run these from `%LOCALAPPDATA%\CodexCopilotAdapter`:
+
+```powershell
+.\Manage-Adapter.ps1 -Action Stop
+.\Manage-Adapter.ps1 -Action RemoveStartup
+copilot-proxy start
+copilot-proxy status
+```
+
+These actions preserve the configured route, old files and backups. Do not use `Rollback` for this migration because it disables routing. Configure any Windows sign-in launcher to run `copilot-proxy start`; the integrated runtime does not need a second startup entry.
+
+## Legacy standalone installer
+
+The sections below apply only to the retained standalone Windows management scripts, not to the bundled npm runtime.
+
+### Install on the other desktop
 
 1. Install Node.js 24 or newer and open a new terminal. `node --version` must work.
 2. Sign in to Codex with ChatGPT on that desktop and enable/connect its Codex Remote host.
@@ -47,7 +79,7 @@ From this source folder, or `%LOCALAPPDATA%\CodexCopilotAdapter`:
 
 Logs are in `%LOCALAPPDATA%\CodexCopilotAdapter\adapter-events.jsonl` and `stderr.log`. The event log records routes, models and outcomes, with no prompts or credentials. `/health` alone does not prove upstream availability. After the phone test, the event log should show a `/v1/responses` forward followed by status 200 and `completed: true` for that request.
 
-Run `node --test adapter.test.mjs` in this source folder to run its 10 local tests, using fake credentials and mock upstream servers. From the repository root, use `node --test codex-copilot-adapter/adapter.test.mjs`; the root `npm test` command also discovers these tests. They cover authentication, token rotation, header filtering, WebSocket fallback, decompression, request limits, streaming, cancellation, timeouts, model-list format, tool results and conversation history.
+Run `node --test adapter.test.mjs` in this source folder using fake credentials and mock upstream servers. From the repository root, use `node --test codex-copilot-adapter/adapter.test.mjs`; the root `npm test` command also covers the integrated startup, status and packaging paths. Runtime tests cover authentication, token rotation, header filtering, WebSocket fallback and TCP resets, decompression, request limits, streaming, cancellation, timeouts, model-list format, tool results and conversation history.
 
 ## Roll back
 

@@ -28,8 +28,9 @@ try {
   const [packed] = Object.values(report);
   assert.equal(packed.name, 'copilot-proxy');
   for (const file of packed.files) {
-    assert.match(file.path, /^(package\.json|README\.md|src\/[^/]+\.js)$/, `Unexpected package file: ${file.path}`);
+    assert.match(file.path, /^(package\.json|README\.md|src\/[^/]+\.js|codex-copilot-adapter\/adapter\.mjs)$/, `Unexpected package file: ${file.path}`);
   }
+  assert.ok(packed.files.some(file => file.path === 'codex-copilot-adapter/adapter.mjs'), 'Adapter runtime must ship in the same package.');
   const prefix = join(temporary, 'install');
   const cwd = join(temporary, 'consumer');
   await mkdir(cwd);
@@ -46,6 +47,7 @@ try {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^COPILOT_PROXY_|^PATH$/i.test(key)));
   env.PATH = [process.platform === 'win32' ? prefix : join(prefix, 'bin'), process.env.PATH || process.env.Path].join(delimiter);
   env.COPILOT_PROXY_AUTH_FILE = join(temporary, 'not-logged-in.json');
+  env.CODEX_HOME = join(temporary, 'codex');
   function command(args) {
     // All arguments here are fixed test values. No shell quoting of user input.
     assert.ok(args.every(arg => /^[a-zA-Z0-9=-]+$/.test(arg)));
@@ -71,7 +73,7 @@ try {
     return true;
   });
 
-  const [file, argv] = command(['start', '--port', '0']);
+  const [file, argv] = command(['start', '--port', '0', '--adapter-port', '0']);
   server = spawn(file, argv, { cwd, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   let errors = '';
@@ -95,6 +97,14 @@ try {
   const error = (await models.json()).error;
   assert.equal(error.code, 'login_required');
   assert.match(error.message, /copilot-proxy login/);
+  const adapterUrl = output.match(/Codex Remote adapter listening at (http:\/\/127\.0\.0\.1:\d+)/)?.[1];
+  assert.ok(adapterUrl, 'The installed start command must start the bundled adapter.');
+  const adapterHealth = await (await fetch(`${adapterUrl}/health`, { signal: AbortSignal.timeout(5000) })).json();
+  assert.equal(adapterHealth.service, 'codex-copilot-adapter');
+  assert.equal(adapterHealth.upstream, url);
+  const status = await cli(['status', '--port', new URL(url).port, '--adapter-port', new URL(adapterUrl).port]);
+  assert.match(status.stdout, /Model serving.*Running/);
+  assert.match(status.stdout, /Codex Remote adapter.*Running/);
   console.log(`Package smoke test passed: ${packed.name}@${packed.version} (${packed.files.length} files).`);
 } finally {
   if (server?.pid && server.exitCode === null && server.signalCode === null) {
